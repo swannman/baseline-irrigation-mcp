@@ -1,8 +1,7 @@
-# Baseline / BaseManager Web API — Reverse-Engineered Reference
+# Baseline / BaseManager Web API
 
 Notes from observing https://baselineapps.net (BaseManager / AppManager / Analytics SPA)
-against a live Operator account. There is **no public/documented API**; the web UI talks to
-several backend services. This MCP server targets the read + alert + reporting subset.
+against a live Operator account.
 
 Identifiers below are placeholders: `{companyId}`, `{controllerId}`, `{MAC}`, `<serial>`.
 
