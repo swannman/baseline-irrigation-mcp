@@ -3,11 +3,6 @@
 An [MCP](https://modelcontextprotocol.io) server for the **Baseline / BaseManager**
 irrigation controller system at [baselineapps.net](https://baselineapps.net).
 
-Baseline ships only a web UI — there's no public API. This server reverse-engineers the
-private JSON/XML endpoints the BaseManager SPA uses (see
-[`research/API-REFERENCE.md`](research/API-REFERENCE.md)) and exposes them as MCP tools so
-an agent can read controller status, faults, and reports.
-
 **Scope: read-only.** Status, alarms, and reporting. No watering/control or schedule-edit
 endpoints are exposed.
 
