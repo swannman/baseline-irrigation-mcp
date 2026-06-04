@@ -116,5 +116,5 @@ scripts/
   smoke.ts    live API smoke test
   mcp-check.ts  MCP protocol smoke test
 research/
-  API-REFERENCE.md   reverse-engineered endpoint notes
+  API-REFERENCE.md   API observations
 ```
