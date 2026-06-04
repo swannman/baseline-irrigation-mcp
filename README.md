@@ -11,7 +11,8 @@ endpoints are exposed.
 | Tool | What it returns |
 |------|-----------------|
 | `baseline_whoami` | Logged-in user, access level, company, assigned controller ids. |
-| `baseline_list_controllers` | Sites and controllers with model, firmware, subscription, and device counts. |
+| `baseline_list_companies` | Organizations this account can access (for multi-org accounts). |
+| `baseline_list_controllers` | Sites and controllers across all accessible organizations, with model, firmware, subscription, and device counts. |
 | `baseline_get_status` | Live snapshot: controller + per-zone + per-device status codes and decoded sensor readings. |
 | `baseline_list_zones` | Zone config: number, name, decoder, enabled, designed/learned flow, hydrozone agronomy. |
 | `baseline_get_alarms` | Active alarms/faults, decoded (sender device + fault type). `includeCleared` to show resolved. |
@@ -35,8 +36,20 @@ The intended workflow is **enumerate objects, then ask for live or historical da
 and is the **only** source for historical **pressure**. `baseline_get_report` is the older
 getData.php path, kept for water-usage/runtime aggregates.
 
-Tools that take a `controllerId` default to the account's sole assigned controller when it's
-omitted.
+### Accounts, organizations & controllers
+
+A controller is the primary key for every data tool; organizations (companies) are a grouping.
+Some accounts can access **multiple organizations and controllers**. Tools that take a
+`controllerId` resolve it in this order:
+
+1. the explicit `controllerId` argument, else
+2. the `BASELINE_CONTROLLER_ID` env default, else
+3. the sole accessible controller (when there's exactly one).
+
+If several controllers are accessible and none is specified, the tool returns the list so you
+can pick one. `baseline_list_companies` → `baseline_list_controllers` enumerates everything.
+Set `BASELINE_COMPANY_ID` to restrict enumeration to one organization, and/or
+`BASELINE_CONTROLLER_ID` to pin a default controller.
 
 ### Report types
 

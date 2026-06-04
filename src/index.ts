@@ -11,6 +11,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 
 import { BaselineClient, BaselineHttpError, type Identity } from "./client.js";
+import { Catalog } from "./catalog.js";
 import { REPORT_TYPES, HISTORY_KINDS, GRANULARITIES } from "./codes.js";
 import {
   summarizeAlarms,
@@ -43,41 +44,35 @@ const client = new BaselineClient({
   timeoutMs: Number(process.env.BASELINE_TIMEOUT_MS ?? 30000),
 });
 
+/** Optional numeric env override; warns and ignores a non-numeric value. */
+function numericEnv(name: string): number | undefined {
+  const raw = process.env[name];
+  if (raw == null || raw.trim() === "") return undefined;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) {
+    console.error(`[baseline-mcp] Ignoring non-numeric ${name}="${raw}".`);
+    return undefined;
+  }
+  return n;
+}
+
+// Accounts may span multiple orgs/controllers; these pin a default scope.
+const catalog = new Catalog(client, {
+  scopeCompanyId: numericEnv("BASELINE_COMPANY_ID"),
+  defaultControllerId: numericEnv("BASELINE_CONTROLLER_ID"),
+});
+
 // ---- small caches so tools can default sensibly -----------------------------
 
 let identityCache: Identity | null = null;
-const macById = new Map<number, string>();
 
 async function getIdentity(): Promise<Identity> {
   if (!identityCache) identityCache = await client.whoami();
   return identityCache;
 }
 
-/** Resolve a controller id, defaulting to the only assigned controller when omitted. */
-async function resolveControllerId(given?: number): Promise<number> {
-  if (given != null) return given;
-  const id = await getIdentity();
-  const assigned = id.user?.assignedControllers ?? [];
-  if (assigned.length === 1) return assigned[0];
-  if (assigned.length === 0)
-    throw new Error("No controllers are assigned to this account.");
-  throw new Error(
-    `Multiple controllers assigned (${assigned.join(", ")}). Pass controllerId.`,
-  );
-}
-
-/** Resolve a controller's MAC (needed for reports), caching via the status endpoint. */
-async function resolveMac(controllerId: number): Promise<string> {
-  const cached = macById.get(controllerId);
-  if (cached) return cached;
-  const status = await client.getJson<{ macaddress?: string }>(
-    `/baseservice2/controllers/${controllerId}/status`,
-  );
-  if (!status.macaddress)
-    throw new Error(`Could not determine MAC for controller ${controllerId}.`);
-  macById.set(controllerId, status.macaddress);
-  return status.macaddress;
-}
+const resolveControllerId = (given?: number) => catalog.resolveControllerId(given);
+const resolveMac = (controllerId: number) => catalog.resolveMac(controllerId);
 
 // ---- server ------------------------------------------------------------------
 
@@ -114,7 +109,8 @@ const controllerIdArg = z
   .int()
   .optional()
   .describe(
-    "Controller id. Optional when the account has exactly one assigned controller.",
+    "Controller id (from baseline_list_controllers). Optional when the account has exactly " +
+      "one accessible controller or BASELINE_CONTROLLER_ID is set; otherwise required.",
   );
 
 server.registerTool(
@@ -129,25 +125,48 @@ server.registerTool(
 );
 
 server.registerTool(
-  "baseline_list_controllers",
+  "baseline_list_companies",
   {
-    title: "List controllers",
+    title: "List organizations",
     description:
-      "List the company's sites and controllers with model, firmware, subscription status, and device counts (zones, flow meters, sensors, etc.).",
+      "List the Baseline organizations (companies) this account can access. Use a companyId to scope baseline_list_controllers, or pin one via BASELINE_COMPANY_ID.",
     inputSchema: {},
   },
   () =>
     tool(async () => {
-      const id = await getIdentity();
-      const companyId = id.currentCompany?.id;
-      if (!companyId) throw new Error("No current company on this session.");
-      const company = await client.getJson(`/baseservice2/companys/${companyId}`);
-      const topo = summarizeTopology(company as Record<string, any>);
-      // opportunistically cache MACs
-      for (const site of topo.sites)
-        for (const c of site.controllers)
-          if (c.id && c.mac) macById.set(c.id, c.mac);
-      return topo;
+      const companies = await catalog.listCompanies();
+      return { count: companies.length, companies };
+    }),
+);
+
+server.registerTool(
+  "baseline_list_controllers",
+  {
+    title: "List controllers",
+    description:
+      "List sites and controllers (with model, firmware, subscription, device counts) across every organization the account can access. Pass companyId to limit to one org.",
+    inputSchema: {
+      companyId: z
+        .number()
+        .int()
+        .optional()
+        .describe("Limit to a single organization (from baseline_list_companies)."),
+    },
+  },
+  ({ companyId }) =>
+    tool(async () => {
+      const companies = companyId != null
+        ? [{ id: companyId, name: "" }]
+        : await catalog.listCompanies();
+      const orgs = [];
+      for (const co of companies) {
+        const tree = await catalog.getCompanyTree(co.id);
+        const topo = summarizeTopology(tree as Record<string, any>);
+        for (const site of topo.sites)
+          for (const c of site.controllers) catalog.noteMac(c.id, c.mac);
+        orgs.push(topo);
+      }
+      return { organizationCount: orgs.length, organizations: orgs };
     }),
 );
 
@@ -166,7 +185,7 @@ server.registerTool(
         `/baseservice2/controllers/${cid}/status`,
       );
       const s = status as { macaddress?: string };
-      if (s.macaddress) macById.set(cid, s.macaddress);
+      catalog.noteMac(cid, s.macaddress);
       return summarizeStatus(status as Record<string, any>);
     }),
 );
@@ -288,19 +307,12 @@ server.registerTool(
   ({ controllerId }) =>
     tool(async () => {
       const cid = await resolveControllerId(controllerId);
-      const id = await getIdentity();
-      const companyId = id.currentCompany?.id;
-      if (!companyId) throw new Error("No current company on this session.");
-      // Topology carries full device objects (serials); /zones carries full zones.
-      const [company, zones] = await Promise.all([
-        client.getJson<any>(`/baseservice2/companys/${companyId}`),
+      // Topology controller carries full device objects (serials); /zones carries full zones.
+      const [controller, zones] = await Promise.all([
+        catalog.controllerObject(cid),
         client.getJson<any[]>(`/baseservice2/controllers/${cid}/zones`),
       ]);
-      const controller = (company.sites ?? [])
-        .flatMap((s: any) => s.controllers ?? [])
-        .find((c: any) => c.id === cid);
-      if (!controller) throw new Error(`Controller ${cid} not found in topology.`);
-      if (controller.macaddress) macById.set(cid, controller.macaddress);
+      catalog.noteMac(cid, controller.macaddress);
       return summarizeDevices(controller, zones);
     }),
 );
@@ -342,7 +354,7 @@ server.registerTool(
       const cid = await resolveControllerId(controllerId);
       const status = await client.getJson(`/baseservice2/controllers/${cid}/status`);
       const s = status as { macaddress?: string };
-      if (s.macaddress) macById.set(cid, s.macaddress);
+      catalog.noteMac(cid, s.macaddress);
       const live = findLiveDevice(status as Record<string, any>, deviceSn);
       if (!live.found) {
         throw new Error(
